@@ -1,101 +1,157 @@
-import matplotlib.pyplot as plt
-import numpy as np
 import streamlit as st
+import pandas as pd
+import pydeck as pdk
+from pyproj import Transformer
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
-# --- PAGE CONFIG --- #
-st.set_page_config(
-    page_title="Hardening Soil Model",
-    layout="wide"
-)
+# -----------------
+# 1. Sample Data Setup
+# -----------------
 
-# --- SIDEBAR --- #
-sb = st.sidebar
-max_depth = sb.slider(
-    "Maximum depth for figure (m)", min_value=10, max_value=100, value=20
-)
-sb.markdown(
-    "Read about Hardening Soil in [this blog post.](https://berkdemir.github.io/2021/05/11/Hardening-Soil-Model/)"
-)
-sb.caption(
-    "Boussinesq only for vertical stress; horizontal = K0 * vertical."
-)
+# Simulate LOCA (location) table
+loca_data = [
+    {'LOCA_ID': 'BH01', 'LOCA_GL': 50.0, 'EASTING': 551000, 'NORTHING': 180000},
+    {'LOCA_ID': 'BH02', 'LOCA_GL': 48.5, 'EASTING': 552000, 'NORTHING': 180500},
+    {'LOCA_ID': 'BH03', 'LOCA_GL': 46.0, 'EASTING': 551500, 'NORTHING': 181000},
+]
+loca_df = pd.DataFrame(loca_data)
 
-# --- MAIN TITLE --- #
-st.title("Hardening Soil Model | Effect of Power m")
+# Simulate Lithology log
+litho_data = [
+    # BH01
+    {'LOCA_ID': 'BH01', 'TOP_BG': 0, 'BASE_BG': 1, 'GEOL_CODE': 'HWH_CLAY', 'GEOL_DESC': 'Harwich Formation silty clay'},
+    {'LOCA_ID': 'BH01', 'TOP_BG': 1, 'BASE_BG': 3, 'GEOL_CODE': 'HWH_SILTSTONE', 'GEOL_DESC': 'Harwich siltstone'},
+    {'LOCA_ID': 'BH01', 'TOP_BG': 3, 'BASE_BG': 5, 'GEOL_CODE': 'LONDON_CLAY', 'GEOL_DESC': 'London Clay very stiff'},
+    # BH02
+    {'LOCA_ID': 'BH02', 'TOP_BG': 0, 'BASE_BG': 2, 'GEOL_CODE': 'HWH_CLAY', 'GEOL_DESC': 'Harwich Formation silty clay'},
+    {'LOCA_ID': 'BH02', 'TOP_BG': 2, 'BASE_BG': 3.5, 'GEOL_CODE': 'LONDON_CLAY', 'GEOL_DESC': 'London Clay sandy'},
+    # BH03
+    {'LOCA_ID': 'BH03', 'TOP_BG': 0, 'BASE_BG': 1.2, 'GEOL_CODE': 'HWH_CLAY', 'GEOL_DESC': 'Harwich Formation silty clay'},
+    {'LOCA_ID': 'BH03', 'TOP_BG': 1.2, 'BASE_BG': 4.0, 'GEOL_CODE': 'LONDON_CLAY', 'GEOL_DESC': 'London Clay laminated'},
+]
+litho_df = pd.DataFrame(litho_data)
 
-# --- PARAMETER INPUTS --- #
-columns = st.columns([1, 1, 3])
-with columns[0]:
-    B = st.slider("Width of Foundation (m)", 1, 100, 20)
-    L = st.slider("Length of Foundation (m)", 1, 100, 40)
-    q = st.slider("Pressure on Foundation (kPa)", 0, 500, 100)
-    UW = st.slider("Unit Weight of Soil (kN/m3)", 0, 25, 20)
-    K0 = st.slider("Coefficient of Lateral Earth Pressure", 0.0, 2.0, 0.5)
+# -----------------
+# 2. Color Mapping for Formations
+# -----------------
+formation_colors = {
+    'HWH_CLAY': '#e377c2',         # pink/magenta
+    'HWH_SILTSTONE': '#17becf',    # teal
+    'LONDON_CLAY': '#bcbd22',      # olive
+}
+default_color = '#cccccc'
 
-with columns[1]:
-    m = st.slider("Power m", 0.0, 1.0, 0.55)
-    pref = st.slider("Reference Pressure, pref (kPa)", 10, 500, 100)
-    E50ref = st.slider("E50ref (MPa)", 10, 500, 50)
-    c = st.slider("Cohesion (kPa)", 0, 200, 20)
-    phi = st.slider("Angle of Friction (deg)", 0, 45, 30)
+# -----------------
+# 3. Coordinate Transformation (OSGB36 to WGS84)
+# -----------------
+transformer = Transformer.from_crs("epsg:27700", "epsg:4326", always_xy=True)
+def grid_to_latlon(easting, northing):
+    lon, lat = transformer.transform(easting, northing)
+    return lat, lon
 
-# --- CORE CALCULATIONS --- #
-def boussinesq(L, B, z, q):
-    mL = L / B
-    b = B / 2
-    n = z / b
-    I = (
-        (
-            mL * n * (1 + mL**2 + 2*n**2) /
-            np.sqrt(1 + mL**2 + n**2) /
-            (1 + n**2) /
-            (mL**2 + n**2)
-            + np.arcsin(mL / (np.sqrt(mL**2 + n**2) * np.sqrt(1 + n**2)))
-        ) * 2 / np.pi
+loca_df[['LAT', 'LON']] = loca_df.apply(lambda row: pd.Series(grid_to_latlon(row['EASTING'], row['NORTHING'])), axis=1)
+
+# -----------------
+# 4. Streamlit Layout
+# -----------------
+st.set_page_config(layout="wide")
+st.title('Harwich Formation Lithological Analysis')
+
+left, right = st.columns([1, 2])
+
+with right:
+    st.subheader("Borehole Locations (click to select)")
+    # Prepare pydeck data
+    view_state = pdk.ViewState(
+        longitude=loca_df['LON'].mean(),
+        latitude=loca_df['LAT'].mean(),
+        zoom=13,
+        pitch=0,
     )
-    return q * I
+    # Scatterplot layer for boreholes
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=loca_df,
+        pickable=True,
+        get_position='[LON, LAT]',
+        get_radius=25,
+        get_fill_color='[200, 30, 0, 180]',
+        get_line_color='[0, 0, 0]',
+        line_width_min_pixels=2,
+    )
+    # Add tooltips to display LOCA_ID
+    tooltip={"text": "LOCA_ID: {LOCA_ID}"}
 
-def Ecalc(E50ref, q, K0, m, pref, c, phi):
-    return E50ref * (
-        (c * np.cos(np.radians(phi)) + q * K0 * np.sin(np.radians(phi))) /
-        (c * np.cos(np.radians(phi)) + pref * np.sin(np.radians(phi)))
-    ) ** m
+    # Render
+    r = pdk.Deck(map_style="mapbox://styles/mapbox/satellite-v9",
+                 initial_view_state=view_state,
+                 layers=[layer],
+                 tooltip=tooltip)
+    selected_point = st.pydeck_chart(r)
+    st.markdown("*Map auto-zooms to all available boreholes.*")
 
-depth = np.arange(0, max_depth+1, 1)
-qred = []
-E50_load = []
-E50_load_m0 = []
-E50_load_m05 = []
-E50_load_m1 = []
+    # Streamlit/pydeck can't directly capture point click, so workaround below.
 
-for i in depth:
-    q_eff = boussinesq(L, B, i, q) + UW * i
-    qred.append(q_eff)
-    E50_load.append(Ecalc(E50ref, q_eff, K0, m, pref, c, phi))
-    E50_load_m0.append(Ecalc(E50ref, q_eff, K0, 0, pref, c, phi))
-    E50_load_m05.append(Ecalc(E50ref, q_eff, K0, 0.5, pref, c, phi))
-    E50_load_m1.append(Ecalc(E50ref, q_eff, K0, 1, pref, c, phi))
+# --------------
+# 5. Selection workaround: dropdown selection
+# (Pydeck click selection not supported natively in streamlit yet, so we provide a dropdown next to the map)
+# --------------
 
-# --- PLOTTING --- #
-fig, ax = plt.subplots(1, 2, figsize=(10, 6), sharey=True)
-ax[0].plot(qred, depth, label="Pressure with Depth", color="red")
-ax[0].set_xlabel("Pressure (kPa)")
-ax[0].set_ylabel("Depth (m)")
-ax[0].invert_yaxis()
-ax[0].legend(fontsize=8)
-ax[0].set_title("Pressure Difference with Depth (Boussinesq)")
+with left:
+    st.subheader("Borehole Lithology")
+    selected_id = st.selectbox(
+        "Select a borehole for lithology detail (or click marker label on map):",
+        [''] + loca_df['LOCA_ID'].tolist(),
+        index=0
+    )
+    if selected_id:
+        borehole = loca_df[loca_df['LOCA_ID'] == selected_id].iloc[0]
+        intervals = litho_df[litho_df['LOCA_ID'] == selected_id].sort_values(by='TOP_BG')
+        if not intervals.empty:
+            ground_level = borehole['LOCA_GL']
+            fig, ax = plt.subplots(figsize=(2, 6))
+            for _, row in intervals.iterrows():
+                top_m_od = ground_level - row['TOP_BG']
+                base_m_od = ground_level - row['BASE_BG']
+                color = formation_colors.get(row['GEOL_CODE'], default_color)
+                ax.add_patch(
+                    patches.Rectangle(
+                        (0.05, base_m_od),   # x, y
+                        0.9,                 # width
+                        top_m_od - base_m_od, # height
+                        facecolor=color,
+                        edgecolor='black'
+                    )
+                )
+                # Text label
+                ax.text(0.5, (top_m_od+base_m_od)/2, row['GEOL_CODE'],
+                        ha='center', va='center', fontsize=8, color='black', rotation=90)
+            ax.set_ylim(
+                intervals.apply(lambda r: ground_level - r['BASE_BG'], axis=1).min() - 0.5,
+                ground_level + 0.5
+            )
+            ax.set_xlim(0, 1)
+            ax.invert_yaxis()
+            ax.set_xticks([])
+            ax.set_ylabel('Elevation (m OD)')
+            st.pyplot(fig)
+            st.markdown("**Interval Table:**")
+            # Elevation columns based on OD
+            intervals = intervals.copy()
+            intervals['Top_elev_OD'] = ground_level - intervals['TOP_BG']
+            intervals['Base_elev_OD'] = ground_level - intervals['BASE_BG']
+            st.dataframe(
+                intervals[['Top_elev_OD', 'Base_elev_OD', 'GEOL_CODE', 'GEOL_DESC']],
+                hide_index=True
+            )
+        else:
+            st.info("No lithology data available for this location.")
+    else:
+        st.markdown("_Select a point on the map or choose from the dropdown to see lithology details._")
 
-ax[1].plot(E50_load, depth, label=f"m = {m:.2f}", color="red")
-ax[1].plot(E50_load_m0, depth, label="m = 0", color="red", ls="--", lw=1)
-ax[1].plot(E50_load_m05, depth, label="m = 0.5", color="green", ls="--", lw=0.5)
-ax[1].plot(E50_load_m1, depth, label="m = 1", color="gray", ls="--", lw=1)
-ax[1].set_xlabel("E50 (MPa)")
-ax[1].legend(fontsize=8)
-ax[1].set_title("E50 with Depth")
-ax[1].fill_betweenx(depth, E50_load_m1, E50_load_m0, color="gray", alpha=0.1)
-
-fig.suptitle("Effect of Load and Power m on E50", fontsize=16)
-fig.tight_layout()
-
-with columns[2]:
-    st.pyplot(fig)
+# -----
+# Notes:
+# - Replace simulated DataFrames with your real AGS data for production use.
+# - If you implement in a pure Streamlit Cloud environment, `pydeck` and map style keys may require setup.
+# -----
